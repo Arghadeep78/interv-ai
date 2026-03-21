@@ -1,5 +1,6 @@
 fastapi
-uvicorn
+uvicorn[standard]
+websockets
 langgraph
 langchain-groq
 langchain-community
@@ -10,7 +11,6 @@ tavily-python
 redis
 arq
 prisma
-pypdf
 python-dotenv
 pydantic
 python-multipart

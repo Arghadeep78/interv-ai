@@ -3,11 +3,11 @@ from agentic_ai_interviewer.state import InterviewState
 from agentic_ai_interviewer.LLM import get_llm
 from agentic_ai_interviewer.tools.vectorstore import load_faiss_index
 from langchain_community.tools.tavily_search import TavilySearchResults
-from bullmq import Queue
+from arq import create_pool
+from arq.connections import RedisSettings
 import os
 
 redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
-db_write_queue = Queue("db_write_queue", {"connection": redis_url})
 
 def extract_jd_skills(state: InterviewState) -> InterviewState:
     session_id = state.get("session_id")
@@ -182,6 +182,12 @@ async def generate_report(state: InterviewState) -> InterviewState:
     state["final_report"] = final_report
     
     # Push the completed state to the DB write queue asynchronously
-    await db_write_queue.add("save_session", {"state": state})
+    try:
+        redis_settings = RedisSettings.from_dsn(redis_url)
+        pool = await create_pool(redis_settings)
+        await pool.enqueue_job("process_db_write", state)
+        await pool.close()
+    except Exception as e:
+        print(f"Failed to enqueue DB write job: {e}")
     
     return {"final_report": final_report}
