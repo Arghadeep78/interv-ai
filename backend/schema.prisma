@@ -1,0 +1,19 @@
+generator client {
+  provider             = "prisma-client-py"
+  recursive_type_depth = 5
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model InterviewSession {
+  id              String   @id @default(uuid())
+  sessionId       String   @unique
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  finalReport     String?  
+  evaluations     Json?    // Stores the array of evaluations
+  extractedSkills Json?    // Stores the JD skills extracted
+}

@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+langgraph
+langchain-groq
+langchain-community
+langchain-huggingface
+sentence-transformers
+faiss-cpu
+tavily-python
+redis
+bullmq
+prisma
+python-dotenv
+pydantic
+python-multipart
