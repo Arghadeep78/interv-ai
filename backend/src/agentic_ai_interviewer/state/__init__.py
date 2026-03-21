@@ -1,32 +1,38 @@
-from typing import TypedDict, List, Dict, Any, Optional
+from typing import TypedDict, List, Dict, Any
+
 
 class InterviewState(TypedDict):
-    # Identifiers
+    # Identifiers & Timing
     session_id: str
-    
-    # JD Extract Context
-    jd_skills: List[str]
-    
+    start_time: float  # Unix timestamp initialized at session start
+
+    # Raw Document Input (passed during /init_interview)
+    resume_text: str
+    jd_text: str
+
+    # JD Topic Tracking (adaptive coverage)
+    jd_topics: List[str]  # Comprehensive list of skills/topics extracted from JD
+    covered_topics: List[str]  # Topics that have already been evaluated
+
     # Vector DB Context
-    search_query: str 
+    search_query: str
     retrieved_context: List[str]
-    
+
     # Orchestrator Context
-    orchestrator_needs_search: bool 
+    orchestrator_needs_search: bool
     orchestrator_search_results: str
-    
-    # Question Generation Loop
+
+    # Question Generation
     draft_question: str
-    indexes_present_in_db: bool
-    refinement_search_results: str
+    current_difficulty: str  # "Easy", "Medium", or "Hard" — default "Medium"
     final_question: str
-    question_ready: bool 
-    
+    question_ready: bool
+
     # Human Input & Evaluation
     human_answer: str
-    evaluations: List[Dict[str, Any]] # Format: {"q": ..., "a": ..., "score": ..., "feedback": ...}
-    
-    # Loop Conditions
-    current_q_count: int
-    max_q_count: int
+    evaluator_feedback: str  # Context passed from evaluator to generator for next question
+    evaluations: List[Dict[str, Any]]
+    # Format: {"q": ..., "a": ..., "score": ..., "difficulty": ..., "topic_tested": ..., "feedback": ...}
+
+    # Final Output
     final_report: str

@@ -2,9 +2,11 @@ fastapi
 uvicorn[standard]
 websockets
 langgraph
+langgraph-checkpoint-redis
 langchain-groq
 langchain-community
 langchain-huggingface
+langchain-text-splitters
 sentence-transformers
 faiss-cpu
 tavily-python
