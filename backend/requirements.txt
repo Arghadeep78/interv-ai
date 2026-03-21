@@ -8,8 +8,10 @@ sentence-transformers
 faiss-cpu
 tavily-python
 redis
-bullmq
+arq
 prisma
+pypdf
 python-dotenv
 pydantic
 python-multipart
+pypdf

@@ -2,7 +2,7 @@ import asyncio
 import os
 import sys
 import json
-from bullmq import Worker, Job
+from arq.connections import RedisSettings
 from prisma import Prisma
 from dotenv import load_dotenv
 
@@ -12,8 +12,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../.
 load_dotenv()
 redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
 
-async def process_db_write(job: Job):
-    state = job.data.get("state", {})
+async def process_db_write(ctx, state: dict):
     session_id = state.get("session_id")
     
     print(f"Writing session {session_id} to DB...")
@@ -36,16 +35,6 @@ async def process_db_write(job: Job):
     finally:
         await db.disconnect()
 
-async def start_db_worker():
-    print("Starting DB Worker...")
-    worker = Worker(
-        "db_write_queue",
-        process_db_write,
-        {"connection": redis_url}
-    )
-    # Wait indefinitely
-    while True:
-        await asyncio.sleep(3600)
-
-if __name__ == "__main__":
-    asyncio.run(start_db_worker())
+class WorkerSettings:
+    functions = [process_db_write]
+    redis_settings = RedisSettings.from_dsn(redis_url)
