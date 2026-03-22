@@ -25,6 +25,7 @@ class InterviewState(TypedDict):
     # Question Generation
     draft_question: str
     current_difficulty: str  # "Easy", "Medium", or "Hard" — default "Medium"
+    appreciation_text: str
     final_question: str
     question_ready: bool
 

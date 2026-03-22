@@ -622,7 +622,41 @@ Output ONLY the JSON."""
 
 
 # ---------------------------------------------------------------------------
-# 6. GENERATE REPORT
+# 6. GENERATE APPRECIATION
+# ---------------------------------------------------------------------------
+async def generate_appreciation(state: InterviewState) -> dict:
+    """
+    Acts as a Supportive Human Interviewer. Generates a short, empathetic appreciation
+    or encouraging transition based on the candidate's last answer score before moving
+    to the next technical question.
+    """
+    evals = state.get("evaluations", [])
+    if not evals:
+        return {"appreciation_text": ""}
+
+    last_eval = evals[-1]
+    score = last_eval.get("score", 5)
+    candidate_answer = last_eval.get("a", "")
+
+    prompt = f"""You are the empathetic and encouraging persona of an expert technical interviewer. Your job is to make the candidate feel valued and comfortable.
+Score: {score}/10
+Candidate's Answer: {candidate_answer}
+Task:
+- If the score is 7 or above: Generate a brief, warm, and highly natural appreciation (1-2 sentences max). Sound like a real human (e.g., 'Spot on', 'Great explanation').
+- If the score is below 7, or if the candidate struggled/skipped: Provide a very brief, gentle, and encouraging transition (e.g., 'No worries, that is a tough one', 'Good effort, let us pivot').
+Constraints: DO NOT ask questions. DO NOT explain concepts. Output ONLY the conversational text."""
+
+    try:
+        response = await invoke_with_retry(prompt, role="light", temperature=0.7, max_tokens=100)
+        appreciation_text = response.content.strip()
+    except RateLimitExhaustedError:
+        appreciation_text = ""
+        
+    return {"appreciation_text": appreciation_text}
+
+
+# ---------------------------------------------------------------------------
+# 7. GENERATE REPORT
 # ---------------------------------------------------------------------------
 async def generate_report(state: InterviewState) -> dict:
     """

@@ -7,6 +7,7 @@ from agentic_ai_interviewer.nodes import (
     orchestrator_web_search,
     question_generator,
     answer_evaluator,
+    generate_appreciation,
     generate_report,
 )
 
@@ -31,6 +32,7 @@ def build_graph() -> StateGraph:
     workflow.add_node("orchestrator_web_search", orchestrator_web_search)
     workflow.add_node("question_generator", question_generator)
     workflow.add_node("answer_evaluator", answer_evaluator)
+    workflow.add_node("generate_appreciation", generate_appreciation)
     workflow.add_node("generate_report", generate_report)
 
     # 2. Set entry point and edges
@@ -89,9 +91,12 @@ def build_graph() -> StateGraph:
         check_interview_status,
         {
             "end": "generate_report",
-            "continue": "question_generator",
+            "continue": "generate_appreciation",
         },
     )
+
+    # Appreciation always goes to question generator
+    workflow.add_edge("generate_appreciation", "question_generator")
 
     # generate_report → END
     workflow.add_edge("generate_report", END)

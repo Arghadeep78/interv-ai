@@ -5,6 +5,7 @@ import {
   Loader2, CheckCircle2, Mic, BarChart3, Clock,
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -402,7 +403,7 @@ export default function App() {
                         </div>
                       )}
                       <div className="glass rounded-xl p-5 prose-dark overflow-x-auto">
-                        <ReactMarkdown>{m.content}</ReactMarkdown>
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
                       </div>
                     </div>
                   );

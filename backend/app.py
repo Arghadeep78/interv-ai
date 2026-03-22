@@ -124,6 +124,7 @@ async def init_interview(
         "orchestrator_needs_search": False,
         "orchestrator_search_results": "",
         "draft_question": "",
+        "appreciation_text": "",
         "final_question": "",
         "human_answer": "",
         "search_query": "",
@@ -194,14 +195,17 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
 
         # 2. If the graph is paused at the interrupt, stream the question
         if current_state.next and "answer_evaluator" in current_state.next:
+            appreciation = current_state.values.get("appreciation_text", "")
             question = current_state.values.get("final_question", "")
+            content = f"{appreciation}\n\n{question}" if appreciation else question
+
             difficulty = current_state.values.get("current_difficulty", "Medium")
             q_number = len(current_state.values.get("evaluations", [])) + 1
 
             await websocket.send_text(
                 json.dumps({
                     "type": "question",
-                    "content": question,
+                    "content": content,
                     "difficulty": difficulty,
                     "question_number": q_number,
                 })
@@ -342,7 +346,10 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
 
             elif "answer_evaluator" in current_state.next:
                 # Next question is ready
+                appreciation = current_state.values.get("appreciation_text", "")
                 question = current_state.values.get("final_question", "")
+                content = f"{appreciation}\n\n{question}" if appreciation else question
+
                 difficulty = current_state.values.get("current_difficulty", "Medium")
                 evals = current_state.values.get("evaluations", [])
                 q_number = len(evals) + 1
@@ -364,7 +371,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 await websocket.send_text(
                     json.dumps({
                         "type": "question",
-                        "content": question,
+                        "content": content,
                         "difficulty": difficulty,
                         "question_number": q_number,
                     })
