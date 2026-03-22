@@ -25,7 +25,8 @@ graph TD
     E4 --> F
 
     F["answer_evaluator ⏸️ INTERRUPT\nScore · Skip detection · Difficulty adjustment"]
-    F -->|time < 40 min AND topics remain| E
+    F -->|time < 40 min AND topics remain| F1["generate_appreciation\nLight LLM 8B · Warm transition"]
+    F1 --> E
     F -->|time >= 40 min OR all topics covered| G
     F -->|user_requested_stop| G
 
