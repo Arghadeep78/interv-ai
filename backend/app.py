@@ -14,8 +14,10 @@ from fastapi.middleware.cors import CORSMiddleware
 import redis.asyncio as redis
 from dotenv import load_dotenv
 
-from langgraph.checkpoint.redis.aio import AsyncRedisSaver
+from langgraph.checkpoint.memory import MemorySaver
 from agentic_ai_interviewer.graph import build_graph
+from agentic_ai_interviewer.LLM import RateLimitExhaustedError
+from agentic_ai_interviewer.nodes import generate_report
 import pypdf
 
 load_dotenv()
@@ -51,9 +53,8 @@ async def startup():
     # Redis client for session status tracking
     redis_client = redis.from_url(redis_url, decode_responses=True)
 
-    # Build and compile the graph with Redis checkpointer
-    checkpointer = AsyncRedisSaver(conn=redis.from_url(redis_url))
-    await checkpointer.asetup()
+    # Build and compile the graph with Memory checkpointer
+    checkpointer = MemorySaver()
     workflow = build_graph()
     graph_app = workflow.compile(
         checkpointer=checkpointer,
@@ -128,6 +129,9 @@ async def init_interview(
         "search_query": "",
         "retrieved_context": [],
         "final_report": "",
+        "user_requested_stop": False,
+        "requires_hint": False,
+        "failed_condition_context": "",
     }
 
     config = {"configurable": {"thread_id": session_id}}
@@ -226,8 +230,83 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             )
 
             # Run the graph until the next interrupt (or END)
-            async for _ in graph_app.astream(None, config):
-                pass
+            # Wrapped with rate-limit awareness
+            try:
+                async for _ in graph_app.astream(None, config):
+                    pass
+            except RateLimitExhaustedError:
+                # All 5 retries across all fallback models failed
+                # Gracefully conclude the interview with whatever we have
+                current_state = await graph_app.aget_state(config)
+                evals = current_state.values.get("evaluations", []) if current_state and current_state.values else []
+                covered = current_state.values.get("covered_topics", []) if current_state and current_state.values else []
+                jd_topics = current_state.values.get("jd_topics", []) if current_state and current_state.values else []
+
+                # Try to generate a report with current data, or use a fallback message
+                try:
+                    report_state = current_state.values if current_state and current_state.values else {}
+                    report_result = await generate_report(report_state)
+                    report_text = report_result.get("final_report", "")
+                except Exception:
+                    report_text = ""
+
+                if not report_text:
+                    report_text = (
+                        "## Interview Summary\n\n"
+                        "The interview was concluded early due to a temporary service limit.\n\n"
+                        f"**Questions Completed:** {len(evals)}\n"
+                        f"**Topics Covered:** {', '.join(covered) if covered else 'N/A'}\n"
+                        f"**Average Score:** {round(sum(e.get('score', 0) for e in evals) / max(len(evals), 1), 1)}/10\n"
+                    )
+
+                await websocket.send_text(
+                    json.dumps({
+                        "type": "report",
+                        "content": report_text,
+                        "summary": {
+                            "total_questions": len(evals),
+                            "topics_covered": covered,
+                            "topics_required": jd_topics,
+                            "average_score": round(
+                                sum(e.get("score", 0) for e in evals) / max(len(evals), 1), 1
+                            ),
+                            "early_termination": True,
+                            "reason": "Rate limit exhausted — thanks for the interview!",
+                        },
+                    })
+                )
+
+                await redis_client.set(
+                    f"status:{session_id}", "completed_rate_limited", ex=3600
+                )
+                await websocket.close(code=1000)
+                break
+            except Exception as e:
+                # Check if it's a rate-limit-like transient error (not exhausted)
+                err_str = str(e).lower()
+                if any(kw in err_str for kw in ("rate limit", "429", "rate_limit", "too many requests")):
+                    await websocket.send_text(
+                        json.dumps({
+                            "type": "rate_limit",
+                            "content": "I need a moment to process, please wait...",
+                        })
+                    )
+                    await asyncio.sleep(15)
+                    # Retry the stream once after waiting
+                    try:
+                        async for _ in graph_app.astream(None, config):
+                            pass
+                    except Exception:
+                        # If it fails again, continue the loop and let the client resend
+                        await websocket.send_text(
+                            json.dumps({
+                                "type": "rate_limit",
+                                "content": "Still processing... please resend your answer.",
+                            })
+                        )
+                        continue
+                else:
+                    raise
 
             # Check the new state
             current_state = await graph_app.aget_state(config)

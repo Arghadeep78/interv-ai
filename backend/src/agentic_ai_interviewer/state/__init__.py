@@ -34,5 +34,12 @@ class InterviewState(TypedDict):
     evaluations: List[Dict[str, Any]]
     # Format: {"q": ..., "a": ..., "score": ..., "difficulty": ..., "topic_tested": ..., "feedback": ...}
 
+    # Hard Stop
+    user_requested_stop: bool  # default False — set True when user wants to end
+
+    # Socratic Failure Protocol
+    requires_hint: bool  # default False — set True when answer score <= 5
+    failed_condition_context: str  # describes the specific conceptual gap for follow-up
+
     # Final Output
     final_report: str

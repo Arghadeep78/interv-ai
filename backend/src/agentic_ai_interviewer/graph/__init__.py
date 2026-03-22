@@ -61,10 +61,15 @@ def build_graph() -> StateGraph:
     # After evaluation: check if interview should end
     def check_interview_status(state: InterviewState) -> str:
         """
-        Two termination conditions:
-        1. Time Check: 40 minutes (2400 seconds) elapsed
-        2. Topic Check: all jd_topics have been covered
+        Termination conditions (in priority order):
+        1. Hard Stop: user explicitly requested to end
+        2. Time Check: 40 minutes (2400 seconds) elapsed
+        3. Topic Check: all jd_topics have been covered
         """
+        # Priority 1: User requested stop — bypass everything
+        if state.get("user_requested_stop", False):
+            return "end"
+
         start_time = state.get("start_time", 0)
         jd_topics = state.get("jd_topics", [])
         covered = state.get("covered_topics", [])

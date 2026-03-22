@@ -10,7 +10,7 @@ from arq.connections import RedisSettings
 import os
 
 from agentic_ai_interviewer.state import InterviewState
-from agentic_ai_interviewer.LLM import get_llm
+from agentic_ai_interviewer.LLM import get_llm, invoke_with_retry, RateLimitExhaustedError
 from agentic_ai_interviewer.tools.vectorstore import (
     save_faiss_index,
     load_faiss_index,
@@ -57,7 +57,7 @@ async def ingest_documents(state: InterviewState) -> dict:
         "evaluations": [],
         "covered_topics": [],
         "jd_topics": [],
-        "current_difficulty": "Medium",
+        "current_difficulty": "Easy",
         "evaluator_feedback": "",
         "question_ready": False,
     }
@@ -86,27 +86,24 @@ async def orchestrator_service(state: InterviewState) -> dict:
         ]
         vectorstore = add_documents_to_index(new_docs, session_id)
 
-    # Retrieve JD chunks for topic extraction
+    # Retrieve JD chunks for topic extraction (capped at k=3)
     docs = vectorstore.similarity_search(
-        "core technical skills and requirements for the job role", k=5
+        "core technical skills and requirements for the job role", k=3
     )
-    context = "\n".join([d.page_content for d in docs])
-
-    llm = get_llm(temperature=0.1)
+    context = "\n".join([d.page_content[:400] for d in docs])
 
     # Extract topics if not yet extracted
     existing_topics = state.get("jd_topics", [])
     if not existing_topics:
-        extract_prompt = f"""Based on this job description context, extract ALL core technical skills, 
-technologies, and competency areas that should be tested in an interview.
+        extract_prompt = f"""Extract ALL core technical skills and competency areas from this job description to test in an interview.
 
-Job Description Context:
+JD Context:
 {context}
 
-Return ONLY a JSON array of topic strings. Example: ["Python", "System Design", "REST APIs", "SQL"]
+Return ONLY a JSON array of topic strings. Example: ["Python", "System Design", "REST APIs"]
 Output the JSON array and nothing else."""
 
-        response = await llm.ainvoke(extract_prompt)
+        response = await invoke_with_retry(extract_prompt, role="light", temperature=0.1, max_tokens=256)
         try:
             # Try to parse the JSON array from the response
             content = response.content.strip()
@@ -122,18 +119,12 @@ Output the JSON array and nothing else."""
         topics = existing_topics
 
     # Decide if the LLM needs more context on any of these topics
-    decide_prompt = f"""You are preparing to interview a candidate on these skills: {topics}
+    decide_prompt = f"""Skills to interview on: {topics}
+Available context: {context[:300]}
 
-Available context from the job description and resume:
-{context}
+Do you need a web search for more technical depth on any topic? Answer ONLY 'YES' or 'NO'."""
 
-Do you have sufficient technical depth on ALL of these topics to ask expert-level 
-interview questions? If any topic is too niche or unfamiliar, answer YES to indicate 
-you need a web search for more context. Otherwise answer NO.
-
-Answer ONLY 'YES' or 'NO'."""
-
-    decision = await llm.ainvoke(decide_prompt)
+    decision = await invoke_with_retry(decide_prompt, role="light", temperature=0.1, max_tokens=10)
     needs_search = "YES" in decision.content.upper()
 
     return {
@@ -173,96 +164,177 @@ async def orchestrator_web_search(state: InterviewState) -> dict:
     }
 
 
+
+
+
 # ---------------------------------------------------------------------------
 # 4. QUESTION GENERATOR
 # ---------------------------------------------------------------------------
 async def question_generator(state: InterviewState) -> dict:
     """
-    The 'brain' of the system. Picks the next untested topic, performs
-    separate FAISS retrievals for JD context and resume projects/experience,
-    lets the LLM decide if a Tavily web search would improve the question,
-    and generates a contextual interview question that references the
-    candidate's real projects and work experience when relevant.
+    The 'brain' of the system. Four operational modes (checked in order):
+
+    Mode A – STOP DETECTION (light model)
+    Mode B – SOCRATIC HINT
+    Mode C – ICEBREAKER (light model, first question only)
+    Mode D – NORMAL QUESTION
     """
     session_id = state["session_id"]
     jd_topics = state.get("jd_topics", [])
     covered = state.get("covered_topics", [])
-    difficulty = state.get("current_difficulty", "Medium")
+    difficulty = state.get("current_difficulty", "Easy")
     evaluator_feedback = state.get("evaluator_feedback", "")
     evals = state.get("evaluations", [])
+    human_answer = state.get("human_answer", "")
+    requires_hint = state.get("requires_hint", False)
+    failed_condition_context = state.get("failed_condition_context", "")
 
-    # Pick the next untested topic
-    remaining = [t for t in jd_topics if t not in covered]
-    if not remaining:
-        # All topics covered — pick the weakest one for re-assessment
-        if evals:
-            weakest = min(evals, key=lambda e: int(e.get("score", 5)))
-            next_topic = weakest.get("topic_tested", jd_topics[0] if jd_topics else "general")
-        else:
-            next_topic = jd_topics[0] if jd_topics else "general programming"
-    else:
-        next_topic = remaining[0]
+    # ================================================================
+    # MODE A — STOP DETECTION (light model, ~30 tokens prompt)
+    # ================================================================
+    if human_answer:
+        stop_check = await invoke_with_retry(
+            f"""Classify: does this candidate response express intent to END/STOP the interview?
 
-    # ---- FAISS Retrieval: Separate queries for JD and Resume context ----
+Response: \"{human_answer}\"
+
+Output ONLY: STOP or CONTINUE""",
+            role="light", temperature=0.0, max_tokens=5,
+        )
+        if "STOP" in stop_check.content.strip().upper():
+            return {
+                "user_requested_stop": True,
+                "final_question": (
+                    "Understood \u2014 thanks for your time today! "
+                    "Let me wrap up and generate your evaluation report."
+                ),
+                "question_ready": True,
+            }
+
+    # ================================================================
+    # MODE B — SOCRATIC HINT (follow-up on a failed answer)
+    # ================================================================
+    if requires_hint and failed_condition_context:
+        hint_prompt = [
+            {"role": "system", "content": """You are a senior interviewer. The candidate gave a wrong answer.
+Present a SPECIFIC failing scenario (with numbers/volumes) where their solution breaks.
+NEVER reveal the answer. End with a focused question. 2-4 sentences max."""},
+            {"role": "user", "content": f"Problem: {failed_condition_context}\nDifficulty: {difficulty}\n\nGenerate the follow-up question only."},
+        ]
+
+        response = await invoke_with_retry(
+            hint_prompt, role="heavy", temperature=0.7, max_tokens=300,
+        )
+        follow_up = response.content.strip()
+
+        return {
+            "draft_question": follow_up,
+            "final_question": follow_up,
+            "question_ready": True,
+            "requires_hint": False,
+            "failed_condition_context": "",
+        }
+
+    # ================================================================
+    # MODE C — ICEBREAKER (first question, light model)
+    # ================================================================
+    question_number = len(evals) + 1
+
+    if question_number == 1:
+        # Retrieve resume context for personalization
+        vectorstore = load_faiss_index(session_id)
+        resume_docs = vectorstore.similarity_search(
+            "candidate experience projects skills background", k=2
+        )
+        resume_summary = "\n".join([d.page_content[:300] for d in resume_docs])
+
+        icebreaker_prompt = f"""You are a friendly senior interviewer starting a live interview.
+Generate ONE warm, conversational opening question to ease the candidate in.
+
+Pick ONE of these angles:
+- "Tell me a bit about yourself and your journey into tech."
+- "Walk me through your most recent role and what excited you about it."
+- "I see some interesting projects here — what's the one you're most proud of and why?"
+
+Candidate's background: {resume_summary}
+
+Make it natural and encouraging. Output ONLY the question, nothing else."""
+
+        response = await invoke_with_retry(
+            icebreaker_prompt, role="light", temperature=0.8, max_tokens=200,
+        )
+        icebreaker_q = response.content.strip()
+
+        return {
+            "draft_question": icebreaker_q,
+            "final_question": icebreaker_q,
+            "question_ready": True,
+            "search_query": "icebreaker",
+            "requires_hint": False,
+            "failed_condition_context": "",
+        }
+
+    # ================================================================
+    # MODE D — NORMAL QUESTION GENERATION
+    # ================================================================
+
+    # ---- Strict Topic Selection: never re-pick a burned topic ----
+    available_topics = [t for t in jd_topics if t not in covered]
+
+    if not available_topics:
+        return {
+            "user_requested_stop": True,
+            "final_question": (
+                "We've covered all the key topics for this role — great job "
+                "working through everything! Let me compile your evaluation "
+                "report now."
+            ),
+            "question_ready": True,
+        }
+
+    next_topic = available_topics[0]
+
+    # ---- FAISS Retrieval (capped k, truncated context) ----
     vectorstore = load_faiss_index(session_id)
 
-    # Query 1: JD-specific context for the topic (what the role demands)
     jd_docs = vectorstore.similarity_search(
-        f"{next_topic} job requirements skills responsibilities", k=3
+        f"{next_topic} job requirements skills", k=2
     )
-    jd_context = "\n".join([d.page_content for d in jd_docs if d.metadata.get("source") == "jd"])
-    # Fallback: if no JD-tagged docs, use all results
+    jd_context = "\n".join([d.page_content[:400] for d in jd_docs if d.metadata.get("source") == "jd"])
     if not jd_context:
-        jd_context = "\n".join([d.page_content for d in jd_docs])
+        jd_context = "\n".join([d.page_content[:400] for d in jd_docs])
 
-    # Query 2: Resume-specific context (candidate's projects, experience, skills)
     resume_docs = vectorstore.similarity_search(
-        f"{next_topic} project experience work built implemented designed", k=4
+        f"{next_topic} project experience built", k=2
     )
-    resume_context = "\n".join([d.page_content for d in resume_docs if d.metadata.get("source") == "resume"])
+    resume_context = "\n".join([d.page_content[:400] for d in resume_docs if d.metadata.get("source") == "resume"])
     if not resume_context:
-        resume_context = "\n".join([d.page_content for d in resume_docs])
+        resume_context = "\n".join([d.page_content[:400] for d in resume_docs])
 
-    # Query 3: Any previously embedded Tavily/orchestrator knowledge
     knowledge_docs = vectorstore.similarity_search(
-        f"{next_topic} advanced concepts best practices", k=2
+        f"{next_topic} best practices", k=1
     )
     supplementary_context = "\n".join([
-        d.page_content for d in knowledge_docs
+        d.page_content[:300] for d in knowledge_docs
         if d.metadata.get("source", "").startswith("tavily")
     ])
 
-    # Build interview history summary
+    # ---- Sliding-window history (last 5 only) ----
     history = ""
     if evals:
-        history = "Previous Interview History:\n"
-        for e in evals:
-            history += (
-                f"- Topic: {e.get('topic_tested', 'N/A')} | "
-                f"Q: {e['q'][:80]}... | Score: {e['score']}/10 | "
-                f"Difficulty: {e.get('difficulty', 'N/A')}\n"
-            )
+        recent_evals = evals[-5:] if len(evals) > 5 else evals
+        history = "Recent History:\n"
+        for e in recent_evals:
+            history += f"- {e.get('topic_tested', 'N/A')} | Score: {e['score']}/10 | {e.get('difficulty', 'N/A')}\n"
 
-    # ---- LLM Decision: Does the question need a Tavily web search? ----
-    llm = get_llm(temperature=0.3)
+    # ---- Search decision (light model) ----
+    decide_prompt = f"""Topic: \"{next_topic}\" at {difficulty} level.
+Resume context available: {bool(resume_context)}
+JD context available: {bool(jd_context)}
 
-    decide_prompt = f"""You are preparing a {difficulty}-level interview question about "{next_topic}".
+Do you need a web search for technical depth? Answer ONLY 'SEARCH' or 'READY'."""
 
-Context available from the candidate's resume:
-{resume_context[:500] if resume_context else "(No resume context found for this topic)"}
-
-Context available from the job description:
-{jd_context[:500] if jd_context else "(No JD context found for this topic)"}
-
-{f"Supplementary knowledge: {supplementary_context[:300]}" if supplementary_context else ""}
-
-Do you have ENOUGH context to ask a high-quality, technically accurate {difficulty} question about {next_topic}?
-If the topic is niche or you need current best practices / specific technical details to frame a strong question, answer SEARCH.
-If you already have sufficient context, answer READY.
-
-Answer ONLY 'SEARCH' or 'READY'."""
-
-    decision = await llm.ainvoke(decide_prompt)
+    decision = await invoke_with_retry(decide_prompt, role="light", temperature=0.1, max_tokens=10)
     needs_search = "SEARCH" in decision.content.upper()
 
     # ---- Conditional Tavily Search ----
@@ -271,17 +343,16 @@ Answer ONLY 'SEARCH' or 'READY'."""
         try:
             tavily = TavilySearchResults()
             tavily_results = await tavily.ainvoke(
-                {"query": f"Expert {difficulty} level {next_topic} interview question concepts best practices"}
+                {"query": f"{difficulty} {next_topic} interview concepts"}
             )
             if isinstance(tavily_results, list):
                 tavily_context = "\n".join(
-                    [r.get("content", str(r)) if isinstance(r, dict) else str(r) for r in tavily_results[:3]]
+                    [r.get("content", str(r)) if isinstance(r, dict) else str(r) for r in tavily_results[:2]]
                 )
-                # Embed Tavily results back into FAISS for future retrieval
                 if tavily_context:
                     tavily_docs = [
                         Document(
-                            page_content=tavily_context,
+                            page_content=tavily_context[:500],
                             metadata={"source": "tavily_question_gen", "topic": next_topic},
                         )
                     ]
@@ -289,56 +360,51 @@ Answer ONLY 'SEARCH' or 'READY'."""
         except Exception:
             tavily_context = ""
 
-    # ---- Generate the question ----
-    llm = get_llm(temperature=0.7)
+    # ---- Determine interview phase ----
+    if question_number <= 3:
+        interview_phase = "Warm-Up"
+    elif difficulty == "Hard":
+        interview_phase = "Deep-Dive"
+    else:
+        interview_phase = "Core Assessment"
 
-    system_prompt = f"""You are a REAL technical interviewer conducting a live interview. 
-You are NOT an AI assistant — you are a senior engineer evaluating a candidate.
+    is_topic_pivot = evaluator_feedback and any(
+        phrase in evaluator_feedback.lower()
+        for phrase in ["pivot", "move on", "skip", "next topic"]
+    )
+
+    # ---- Condensed system prompt ----
+    system_prompt = f"""You are a senior technical interviewer. Be empathetic, conversational, supportive.
+
+ROLE RULES:
+- SDE roles: ask architectural, "WHY", system-design questions from candidate's tech stack.
+- Non-SDE roles: ask domain-specific analytical/case-study questions.
+
+FOUNDATION FIRST: Start with "why" they chose a technology → probe production concerns → then edge cases (only at Hard difficulty).
 
 RULES:
-- Ask ONE specific, focused technical question at a time
-- The question MUST be at {difficulty} difficulty level
-- The question MUST test the topic: {next_topic}
-- Frame questions that require practical knowledge, not just textbook definitions
-- IMPORTANT: When the candidate's resume mentions projects, work experience, or 
-  technologies relevant to the topic, REFERENCE THEM DIRECTLY in your question.
-  For example: "I see you worked on [project name] — can you walk me through how you..."
-  or "Your resume mentions experience with [tech] at [company] — how did you handle..."
-- This makes the interview feel personal and tests whether they truly did what they claim
-- For Easy: test fundamental understanding and basic application
-- For Medium: test deeper understanding, trade-offs, and practical scenarios
-- For Hard: test advanced concepts, edge cases, system design, and optimization
-- Be conversational and natural, like a real interviewer would be
-- Do NOT reveal that you are an AI or mention any scoring system
+1. ONE focused {difficulty}-level question testing: {next_topic}
+2. NEVER ask to write code/scripts/SQL. Not a coding round.
+3. BANNED: "I see you have...", "Based on your CV...", "You mentioned..."
+4. Frame questions around real production concerns (scaling, fault tolerance, state sync).
+5. Be conversational. Use warm transitions. Don't repeat intros.
+{f"6. PREVIOUS FEEDBACK: {evaluator_feedback}" if evaluator_feedback else ""}
+{"7. Candidate just pivoted — use a warm transition." if is_topic_pivot else ""}"""
 
-{f"FEEDBACK FROM PREVIOUS ANSWER: {evaluator_feedback}" if evaluator_feedback else ""}
-{f"Use this feedback to calibrate the depth and angle of your next question." if evaluator_feedback else ""}"""
+    user_prompt = f"""Topic: {next_topic} | Difficulty: {difficulty} | Q#{question_number} ({interview_phase})
 
-    user_prompt = f"""Topic to test: {next_topic}
-Difficulty: {difficulty}
-
-=== CANDIDATE'S RESUME (Projects, Experience, Skills) ===
-{resume_context if resume_context else "(No specific resume context found for this topic)"}
-
-=== JOB DESCRIPTION REQUIREMENTS ===
-{jd_context if jd_context else "(No specific JD context found for this topic)"}
-
-{f"=== WEB RESEARCH (Technical Depth) ==={chr(10)}{tavily_context}" if tavily_context else ""}
-
-{f"=== SUPPLEMENTARY KNOWLEDGE ==={chr(10)}{supplementary_context}" if supplementary_context else ""}
-
+Resume: {resume_context[:400] if resume_context else "(none)"}
+JD: {jd_context[:400] if jd_context else "(none)"}
+{f"Web research: {tavily_context[:300]}" if tavily_context else ""}
+{f"Extra context: {supplementary_context[:200]}" if supplementary_context else ""}
 {history}
 
-INSTRUCTION: If the resume mentions specific projects, tools, or experience relevant 
-to "{next_topic}", frame your question around those real experiences. Otherwise, ask 
-a scenario-based question grounded in the JD requirements.
+Generate ONE interview question. Output ONLY the question text."""
 
-Generate your interview question now. Output ONLY the question text, nothing else."""
-
-    response = await llm.ainvoke([
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
-    ])
+    response = await invoke_with_retry(
+        [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
+        role="heavy", temperature=0.7, max_tokens=512,
+    )
 
     final_q = response.content.strip()
 
@@ -347,6 +413,8 @@ Generate your interview question now. Output ONLY the question text, nothing els
         "final_question": final_q,
         "question_ready": True,
         "search_query": f"{next_topic} {difficulty}",
+        "requires_hint": False,
+        "failed_condition_context": "",
     }
 
 
@@ -359,6 +427,22 @@ async def answer_evaluator(state: InterviewState) -> dict:
     human_answer, this node scores the answer, determines topic_tested,
     appends to covered_topics, adjusts current_difficulty adaptively,
     and generates evaluator_feedback for the next question cycle.
+
+    TOPIC BURN PROTOCOL:
+        A topic is "burned" (added to covered_topics, moving to next) if:
+        1. The LLM detects skip intent ("I don't know", "pass", "skip"), OR
+        2. The candidate fails a Socratic hint (score<=5 while requires_hint
+           was already True — the "Max 1 Hint" rule).
+        When burned, difficulty is FROZEN (no change).
+
+    SOCRATIC FAILURE PROTOCOL (Max 1 Hint):
+        On FIRST failure (score<=5, not already hinting), sets
+        requires_hint=True for one Socratic follow-up. If the follow-up
+        also fails, the topic is burned.
+
+    GRADUAL DIFFICULTY:
+        Difficulty changes by at most +1 level per turn. Hard is only
+        unlocked after a Medium-level score >= 8.
     """
     session_id = state["session_id"]
     question = state.get("final_question", "")
@@ -367,62 +451,50 @@ async def answer_evaluator(state: InterviewState) -> dict:
     jd_topics = state.get("jd_topics", [])
     covered = list(state.get("covered_topics", []))
 
-    # Retrieve context from FAISS for fact-checking
+    # Retrieve context from FAISS for fact-checking (capped and truncated)
     vectorstore = load_faiss_index(session_id)
     fact_docs = vectorstore.similarity_search(
-        f"{question} answer verification", k=3
+        f"{question} answer verification", k=2
     )
-    fact_context = "\n".join([d.page_content for d in fact_docs])
+    fact_context = "\n".join([d.page_content[:400] for d in fact_docs])
 
-    # Use Tavily for additional fact-checking if the answer involves specific claims
+    # Tavily fact-checking (capped at 1 result)
     tavily_context = ""
     try:
         tavily = TavilySearchResults()
         tavily_results = await tavily.ainvoke(
-            {"query": f"Verify: {question[:100]} correct answer"}
+            {"query": f"Verify: {question[:80]} correct answer"}
         )
         if isinstance(tavily_results, list):
             tavily_context = "\n".join(
-                [r.get("content", str(r)) if isinstance(r, dict) else str(r) for r in tavily_results[:2]]
+                [r.get("content", str(r)) if isinstance(r, dict) else str(r) for r in tavily_results[:1]]
             )
     except Exception:
         tavily_context = ""
 
-    llm = get_llm(temperature=0.2)
+    eval_prompt = f"""Evaluate this interview answer. Respond in JSON only.
 
-    eval_prompt = f"""You are an expert technical interviewer evaluating a candidate's answer.
+Question ({difficulty}): {question}
+Answer: {answer}
+Reference: {fact_context[:500]}
+{f"Verification: {tavily_context[:300]}" if tavily_context else ""}
+JD Topics: {jd_topics}
 
-Question Asked (Difficulty: {difficulty}):
-{question}
-
-Candidate's Answer:
-{answer}
-
-Reference Context (from resume/JD/knowledge base):
-{fact_context}
-
-{f"Additional Verification Context: {tavily_context}" if tavily_context else ""}
-
-Available JD Topics: {jd_topics}
-
-Evaluate the answer and respond in EXACTLY this JSON format:
+JSON format:
 {{
-    "score": <integer 1-10>,
-    "topic_tested": "<the primary technical topic this question tested — must be from the JD topics list if possible>",
-    "feedback": "<detailed 2-3 sentence evaluation of the answer's quality>",
-    "evaluator_feedback": "<specific guidance for the NEXT question: what to probe deeper on, what gaps were revealed, what to adjust>"
+    "score": <1-10>,
+    "topic_tested": "<topic from JD topics>",
+    "is_skip_intent": <true if candidate wants to skip ("I don't know", "pass", "skip"), false if they attempted an answer>,
+    "feedback": "<2-3 sentence evaluation>",
+    "evaluator_feedback": "<guidance for next question>",
+    "requires_hint": <true if score<=5 AND not skipping AND attempted a real answer>,
+    "failed_condition_context": "<specific failing scenario if requires_hint is true, else empty>"
 }}
 
-Scoring guide:
-- 1-3: Incorrect or shows fundamental misunderstanding
-- 4-5: Partially correct but lacks depth
-- 6-7: Good understanding with minor gaps
-- 8-9: Excellent, demonstrates deep practical knowledge
-- 10: Perfect, expert-level answer
+Scoring: 1-3=wrong, 4-5=partial, 6-7=good, 8-9=excellent, 10=perfect.
+Output ONLY the JSON."""
 
-Output ONLY the JSON object, nothing else."""
-
-    response = await llm.ainvoke(eval_prompt)
+    response = await invoke_with_retry(eval_prompt, role="heavy", temperature=0.2, max_tokens=512)
 
     # Parse the evaluation response
     try:
@@ -435,36 +507,82 @@ Output ONLY the JSON object, nothing else."""
         eval_data = {
             "score": 5,
             "topic_tested": jd_topics[0] if jd_topics else "general",
+            "is_skip_intent": False,
             "feedback": response.content.strip(),
             "evaluator_feedback": "Continue with the next topic.",
+            "requires_hint": False,
+            "failed_condition_context": "",
         }
 
     score = int(eval_data.get("score", 5))
     topic_tested = eval_data.get("topic_tested", "general")
+    is_skip_intent = bool(eval_data.get("is_skip_intent", False))
     feedback = eval_data.get("feedback", "No feedback")
     next_feedback = eval_data.get("evaluator_feedback", "")
+    hint_needed = bool(eval_data.get("requires_hint", False))
+    failed_ctx = eval_data.get("failed_condition_context", "")
 
-    # Add topic to covered list
-    if topic_tested not in covered:
+    # Was the candidate already responding to a Socratic hint?
+    was_on_hint = state.get("requires_hint", False)
+
+    # ---- TOPIC BURN DETECTION ----
+    # Burn condition 1: candidate explicitly wants to skip
+    # Burn condition 2: candidate failed the Socratic follow-up (Max 1 Hint rule)
+    failed_hint = was_on_hint and score <= 5
+    topic_burned = is_skip_intent or failed_hint
+
+    if topic_burned:
+        # ---- TOPIC BURN: freeze difficulty, mark topic as covered, move on ----
+        if topic_tested not in covered:
+            covered.append(topic_tested)
+
+        # Conversational pivot feedback for the question generator
+        if is_skip_intent:
+            next_feedback = (
+                "The candidate chose to skip this topic. Let's pivot to "
+                "something else — start with a warm, encouraging transition."
+            )
+        else:
+            next_feedback = (
+                "The candidate attempted a follow-up hint but didn't get there. "
+                "No worries — let's move on to the next topic with an encouraging tone."
+            )
+
+        # Append evaluation record
+        evals = list(state.get("evaluations", []))
+        evals.append({
+            "q": question,
+            "a": answer,
+            "score": score,
+            "difficulty": difficulty,
+            "topic_tested": topic_tested,
+            "feedback": feedback,
+            "skipped": is_skip_intent,
+            "burned": True,
+        })
+
+        return {
+            "evaluations": evals,
+            "covered_topics": covered,
+            "current_difficulty": difficulty,   # FROZEN — no change
+            "evaluator_feedback": next_feedback,
+            "question_ready": False,
+            "requires_hint": False,              # clear hint state
+            "failed_condition_context": "",       # clear
+        }
+
+    # ---- NORMAL FLOW (not burned) ----
+
+    # Mark topic as covered if the candidate passed (no hint needed)
+    if not hint_needed and topic_tested not in covered:
         covered.append(topic_tested)
 
-    # Adaptive difficulty adjustment
+    # ---- Gradual Difficulty Adjustment (+1 max, Medium-pass gate) ----
+    DIFFICULTY_LEVELS = ["Easy", "Medium", "Hard"]
+    current_idx = DIFFICULTY_LEVELS.index(difficulty) if difficulty in DIFFICULTY_LEVELS else 1
     new_difficulty = difficulty
-    if score <= 3:
-        # Failed badly — scale down
-        if difficulty == "Hard":
-            new_difficulty = "Medium"
-        elif difficulty == "Medium":
-            new_difficulty = "Easy"
-    elif score >= 8:
-        # Aced it — scale up
-        if difficulty == "Easy":
-            new_difficulty = "Medium"
-        elif difficulty == "Medium":
-            new_difficulty = "Hard"
-    # Scores 4-7: maintain current difficulty
 
-    # Append evaluation record
+    # Append evaluation record BEFORE difficulty check (so current eval is included)
     evals = list(state.get("evaluations", []))
     evals.append({
         "q": question,
@@ -475,12 +593,31 @@ Output ONLY the JSON object, nothing else."""
         "feedback": feedback,
     })
 
+    if score <= 3:
+        # Failed badly — scale DOWN by 1 level
+        new_difficulty = DIFFICULTY_LEVELS[max(0, current_idx - 1)]
+    elif score >= 8:
+        # Aced it — scale UP by 1 level (with Medium-pass gate for Hard)
+        candidate_idx = min(current_idx + 1, len(DIFFICULTY_LEVELS) - 1)
+        if DIFFICULTY_LEVELS[candidate_idx] == "Hard":
+            # Hard is only unlocked if candidate has passed a Medium question with >= 8
+            has_medium_pass = any(
+                e.get("difficulty") == "Medium" and int(e.get("score", 0)) >= 8
+                for e in evals
+            )
+            if not has_medium_pass:
+                candidate_idx = 1  # stay at Medium
+        new_difficulty = DIFFICULTY_LEVELS[candidate_idx]
+    # Scores 4-7: maintain current difficulty
+
     return {
         "evaluations": evals,
         "covered_topics": covered,
         "current_difficulty": new_difficulty,
         "evaluator_feedback": next_feedback,
         "question_ready": False,  # Reset for next loop
+        "requires_hint": hint_needed,
+        "failed_condition_context": failed_ctx,
     }
 
 
@@ -498,7 +635,7 @@ async def generate_report(state: InterviewState) -> dict:
     start_time = state.get("start_time", 0)
     duration_mins = round((time.time() - start_time) / 60, 1) if start_time else 0
 
-    llm = get_llm(temperature=0.3)
+    llm = get_llm(role="heavy", temperature=0.3, max_tokens=1500)
 
     # Build evaluation summary
     eval_summary = ""
@@ -537,8 +674,8 @@ Write a professional, structured markdown report that includes:
 
 Make the report actionable and useful for hiring managers."""
 
-    response = await llm.ainvoke(prompt)
-    final_report = response.content.strip()
+    llm_response = await invoke_with_retry(prompt, role="heavy", temperature=0.3, max_tokens=1500)
+    final_report = llm_response.content.strip()
 
     # Persist to DB via ARQ worker
     try:

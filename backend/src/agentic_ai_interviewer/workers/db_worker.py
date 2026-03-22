@@ -38,3 +38,7 @@ async def process_db_write(ctx, state: dict):
 class WorkerSettings:
     functions = [process_db_write]
     redis_settings = RedisSettings.from_dsn(redis_url)
+
+if __name__ == "__main__":
+    from arq.worker import run_worker
+    run_worker(WorkerSettings)

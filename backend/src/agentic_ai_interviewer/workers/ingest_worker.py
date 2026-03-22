@@ -48,3 +48,7 @@ async def process_ingestion(ctx, session_id: str, resume_text: str, jd_text: str
 class WorkerSettings:
     functions = [process_ingestion]
     redis_settings = RedisSettings.from_dsn(redis_url)
+
+if __name__ == "__main__":
+    from arq.worker import run_worker
+    run_worker(WorkerSettings)
