@@ -130,15 +130,34 @@ function UploadCard({
 // ---------------------------------------------------------------------------
 // App
 // ---------------------------------------------------------------------------
+const SESSION_KEY  = 'intervai_session_id';
+const STATUS_KEY   = 'intervai_status';
+const MESSAGES_KEY = 'intervai_messages';
+const ELAPSED_KEY  = 'intervai_elapsed';
+
+function loadSession(): { sessionId: string | null; status: Status; messages: Message[]; elapsedSecs: number } {
+  try {
+    return {
+      sessionId:   sessionStorage.getItem(SESSION_KEY),
+      status:      (sessionStorage.getItem(STATUS_KEY) as Status) ?? 'idle',
+      messages:    JSON.parse(sessionStorage.getItem(MESSAGES_KEY) ?? '[]') as Message[],
+      elapsedSecs: Number(sessionStorage.getItem(ELAPSED_KEY) ?? 0),
+    };
+  } catch {
+    return { sessionId: null, status: 'idle', messages: [], elapsedSecs: 0 };
+  }
+}
+
 export default function App() {
+  const saved = useRef(loadSession());
   const [resume, setResume]           = useState<File | null>(null);
   const [jd, setJd]                   = useState<File | null>(null);
-  const [sessionId, setSessionId]     = useState<string | null>(null);
-  const [status, setStatus]           = useState<Status>('idle');
-  const [messages, setMessages]       = useState<Message[]>([]);
+  const [sessionId, setSessionId]     = useState<string | null>(saved.current.sessionId);
+  const [status, setStatus]           = useState<Status>(saved.current.status);
+  const [messages, setMessages]       = useState<Message[]>(saved.current.messages);
   const [currentInput, setCurrentInput] = useState('');
   const [isWaiting, setIsWaiting]     = useState(false);
-  const [elapsedSecs, setElapsedSecs] = useState(0);
+  const [elapsedSecs, setElapsedSecs] = useState(saved.current.elapsedSecs);
   const [initError, setInitError]     = useState<string | null>(null);
   const wsRef              = useRef<WebSocket | null>(null);
   const messagesEndRef     = useRef<HTMLDivElement | null>(null);
@@ -161,8 +180,54 @@ export default function App() {
     return () => { if (timerRef.current) clearInterval(timerRef.current); };
   }, [status]);
 
+  // Persist key state to sessionStorage on every change
+  useEffect(() => {
+    if (sessionId) sessionStorage.setItem(SESSION_KEY, sessionId);
+    else sessionStorage.removeItem(SESSION_KEY);
+  }, [sessionId]);
+
+  useEffect(() => { sessionStorage.setItem(STATUS_KEY, status); }, [status]);
+
+  useEffect(() => {
+    sessionStorage.setItem(MESSAGES_KEY, JSON.stringify(messages));
+    if (messages.length) latestAiIndexRef.current = [...messages].reverse().findIndex(m => m.role === 'ai');
+    if (latestAiIndexRef.current >= 0) latestAiIndexRef.current = messages.length - 1 - latestAiIndexRef.current;
+  }, [messages]);
+
+  useEffect(() => { sessionStorage.setItem(ELAPSED_KEY, String(elapsedSecs)); }, [elapsedSecs]);
+
+  // Reconnect WebSocket after page refresh if interview was mid-session
+  useEffect(() => {
+    const { sessionId: sid, status: st } = saved.current;
+    if (sid && st === 'interviewing') {
+      sessionEndedRef.current = false;
+      const ws = new WebSocket(`${WS_URL}/ws/interview/${sid}`);
+      attachWsHandlers(ws);
+      wsRef.current = ws;
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const fmtTime = (s: number) =>
     `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+
+  // ---------- Reset ----------
+  const resetSession = () => {
+    sessionStorage.removeItem(SESSION_KEY);
+    sessionStorage.removeItem(STATUS_KEY);
+    sessionStorage.removeItem(MESSAGES_KEY);
+    sessionStorage.removeItem(ELAPSED_KEY);
+    wsRef.current?.close();
+    wsRef.current = null;
+    setSessionId(null);
+    setStatus('idle');
+    setMessages([]);
+    setElapsedSecs(0);
+    setCurrentInput('');
+    setIsWaiting(false);
+    setResume(null);
+    setJd(null);
+  };
 
   // ---------- Upload ----------
   const handleStart = async (e: React.FormEvent) => {
@@ -201,17 +266,13 @@ export default function App() {
   };
 
   // ---------- WebSocket ----------
-  const beginInterview = () => {
-    if (!sessionId) return;
-    setStatus('interviewing');
-    setElapsedSecs(0);
-    const ws = new WebSocket(`${WS_URL}/ws/interview/${sessionId}`);
+  const sessionEndedRef = useRef(false);
 
+  const attachWsHandlers = useCallback((ws: WebSocket) => {
     ws.onmessage = (event: MessageEvent) => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const data: any = JSON.parse(event.data as string);
       setIsWaiting(false);
-
       if (data.type === 'question' || data.type === 'message') {
         setMessages(prev => {
           const next: Message[] = [...prev, {
@@ -232,6 +293,7 @@ export default function App() {
       } else if (data.type === 'status') {
         if (data.content === 'evaluating') setIsWaiting(true);
       } else if (data.type === 'report') {
+        sessionEndedRef.current = true;
         setMessages(prev => [...prev, {
           role: 'report',
           content: data.content as string,
@@ -240,17 +302,40 @@ export default function App() {
         setStatus('ended');
       }
     };
+    ws.onclose = (e) => {
+      if (sessionEndedRef.current) return;
+      // Server closed cleanly (interview over) — treat as ended
+      if (e.code === 1000) { setStatus(s => s !== 'ended' ? 'ended' : s); return; }
+      // Unexpected close (tab switch, network blip) — reconnect
+      const sid = sessionId ?? sessionStorage.getItem(SESSION_KEY);
+      if (!sid) { setStatus(s => s !== 'ended' ? 'ended' : s); return; }
+      setTimeout(() => {
+        if (sessionEndedRef.current) return;
+        const newWs = new WebSocket(`${WS_URL}/ws/interview/${sid}`);
+        attachWsHandlers(newWs);
+        wsRef.current = newWs;
+      }, 1000);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
 
-    ws.onclose = () => setStatus(s => s !== 'ended' ? 'ended' : s);
+  const beginInterview = () => {
+    if (!sessionId) return;
+    sessionEndedRef.current = false;
+    setStatus('interviewing');
+    setElapsedSecs(0);
+    const ws = new WebSocket(`${WS_URL}/ws/interview/${sessionId}`);
+    attachWsHandlers(ws);
     wsRef.current = ws;
   };
 
   // ---------- Send ----------
   const sendMessage = (e?: React.FormEvent | React.MouseEvent) => {
     e?.preventDefault();
-    if (!currentInput.trim() || !wsRef.current || isWaiting) return;
+    const ws = wsRef.current;
+    if (!currentInput.trim() || !ws || ws.readyState !== WebSocket.OPEN || isWaiting) return;
     setMessages(prev => [...prev, { role: 'human', content: currentInput }]);
-    wsRef.current.send(currentInput);
+    ws.send(currentInput);
     setCurrentInput('');
     setIsWaiting(true);
     if (textareaRef.current) { textareaRef.current.style.height = 'auto'; }
@@ -288,6 +373,12 @@ export default function App() {
               <Clock className="w-4 h-4 text-accent-soft" />
               <span className="text-sm font-bold font-mono text-secondary">{fmtTime(elapsedSecs)}</span>
             </div>
+          )}
+          {status === 'ended' && (
+            <button onClick={resetSession}
+              className="px-5 py-2 border border-accent text-accent font-display text-sm uppercase tracking-widest hover:bg-accent hover:text-inverse transition-all">
+              New Interview
+            </button>
           )}
         </div>
 
@@ -379,8 +470,8 @@ export default function App() {
 
           {/* CHAT */}
           {(status === 'interviewing' || status === 'ended') && (
-            <>
-              <div className="flex-1 overflow-y-auto p-5 space-y-4">
+            <div className="flex flex-col h-full min-h-0">
+              <div className="flex-1 overflow-y-auto p-5 space-y-4 min-h-0">
                 {messages.map((m, idx) => {
                   if (m.role === 'ai') return (
                     <div key={idx}>
@@ -467,8 +558,8 @@ export default function App() {
                       disabled={isWaiting}
                       style={{ minHeight: '56px', maxHeight: '160px' }}
                     />
-                    <button onClick={sendMessage}
-                      disabled={!currentInput.trim() || isWaiting}
+                    <button type="button" onClick={sendMessage}
+                      disabled={!currentInput.trim() || isWaiting || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN}
                       className="w-14 h-14 bg-accent hover:bg-accent-soft text-inverse disabled:opacity-30 disabled:cursor-not-allowed rounded-none flex items-center justify-center transition-all duration-200 flex-shrink-0">
                       <Send className="w-5 h-5 text-inverse ml-1" />
                     </button>
@@ -478,7 +569,7 @@ export default function App() {
                   </p>
                 </div>
               )}
-            </>
+            </div>
           )}
         </div>
       </div>

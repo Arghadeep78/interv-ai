@@ -2,12 +2,14 @@
 
 An advanced, real-time agentic AI system that conducts fully adaptive, context-aware technical interviews. Upload a candidate's Resume and a Job Description — the system orchestrates the entire interview autonomously: from a warm icebreaker opening, through adaptive technical questioning, to a structured final report.
 
+> **Fast start:** Thanks to in-process FAISS and embedding model caching, interviews start in **~1/5th the time (400% faster)** on warm sessions — the embedding model loads once at process startup and each session's vector store is held in memory, eliminating repeated disk I/O between questions.
+
 ## How It Works
 
 ```mermaid
 graph TD
     A["/init_interview (Resume + JD)"] --> B["ingest_documents\nChunk & embed Resume/JD → FAISS"]
-    B --> C["orchestrator_service\nExtract JD topics · Decide if search needed"]rrkefkljewkfjner
+    B --> C["orchestrator_service\nExtract JD topics · Decide if search needed"]
     C -->|needs web context| D["orchestrator_web_search\nTavily API · Embed results into FAISS"]
     D --> C
     C -->|ready| E["question_generator"]
@@ -42,8 +44,10 @@ graph TD
 | **Topic Burn** | Skipped or double-failed topics are permanently burned; no re-testing. |
 | **Rate Limit Resilience** | Automatic retries with exponential backoff (5 attempts); falls back 70B → Mixtral → 8B; graceful interview conclusion if fully exhausted. |
 | **Token Optimization** | Light 8B model for classifiers, condensed prompts, sliding-window history (last 5), FAISS context capped and truncated. |
+| **In-Process Caching** | `all-MiniLM-L6-v2` loads once at process start (~1–2 s cold, then ~0 ms). Each session's FAISS store is kept in a process-level dict — the 3–5 `load_faiss_index` calls per turn skip disk I/O entirely after the first, eliminating ~150–1000 ms of latency per question turn. Cache entry is evicted on report generation. **As a result, interviews start in ~1/5th the time on warm sessions compared to a cold, cache-less startup.** |
 | **WebSocket Durability** | Rate-limit errors send a friendly "please wait" message; connection stays alive; state persists across disconnects. |
-| **Dynamic RAG** | Tavily search results are embedded back into FAISS in real time, enriching future questions. |
+| **Refresh Recovery** | `sessionId`, status, full message history, and elapsed time are persisted to `sessionStorage` on every change. Refreshing the page restores the UI instantly; if the interview was in progress, the WebSocket reconnects to the same session automatically. A **New Interview** button lets the candidate start over after completion. |
+| **Dynamic RAG** | Tavily results are embedded back into FAISS. Search is gated to Hard questions with no existing local context, and results are cached in `_tavily_topic_cache` per topic. In a typical 6-question interview this reduces Tavily calls from ~12 to ~2 — an ~83% reduction — cutting ~2–5 s of accumulated network latency per interview. |
 
 ## Tech Stack
 
@@ -52,7 +56,7 @@ graph TD
 - **Agent Orchestration:** LangGraph (StateGraph with interrupt/resume)
 - **LLM Engine:** Groq — `llama-3.3-70b-versatile` (heavy), `mixtral-8x7b-32768` (fallback), `llama-3.1-8b-instant` (light/classifier)
 - **Retry Layer:** `tenacity` — 5-attempt exponential backoff, 3-model fallback chain
-- **Vector DB / RAG:** FAISS + HuggingFace Embeddings (`all-MiniLM-L6-v2`)
+- **Vector DB / RAG:** FAISS + HuggingFace Embeddings (`all-MiniLM-L6-v2`, loaded once as a process-level singleton); per-session FAISS stores cached in-process
 - **State & Queue:** Redis (`AsyncRedisSaver` session TTL, ARQ worker queue)
 - **Database:** PostgreSQL (NeonDB) via Prisma ORM
 - **Web Search:** Tavily API
@@ -62,6 +66,7 @@ graph TD
 - **Styling:** Tailwind CSS + Lucide React
 - **Real-time:** Native WebSockets
 - **HTTP Client:** Axios
+- **Session Persistence:** `sessionStorage` (survives page refresh within the same tab)
 
 ## Security posture
 

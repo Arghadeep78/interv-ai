@@ -16,9 +16,12 @@ from agentic_ai_interviewer.tools.vectorstore import (
     load_faiss_index,
     add_documents_to_index,
     delete_faiss_index,
+    invalidate_faiss_cache,
 )
 
 redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
+
+_tavily_topic_cache: dict[str, str] = {}  # topic -> search result string
 
 
 # ---------------------------------------------------------------------------
@@ -328,36 +331,36 @@ Make it natural and encouraging. Output ONLY the question, nothing else."""
         for e in recent_evals:
             history += f"- {e.get('topic_tested', 'N/A')} | Score: {e['score']}/10 | {e.get('difficulty', 'N/A')}\n"
 
-    # ---- Search decision (light model) ----
-    decide_prompt = f"""Topic: \"{next_topic}\" at {difficulty} level.
-Resume context available: {bool(resume_context)}
-JD context available: {bool(jd_context)}
-
-Do you need a web search for technical depth? Answer ONLY 'SEARCH' or 'READY'."""
-
-    decision = await invoke_with_retry(decide_prompt, role="light", temperature=0.1, max_tokens=10)
-    needs_search = "SEARCH" in decision.content.upper()
+    # ---- Search decision (deterministic) ----
+    needs_search = (
+        difficulty == "Hard"
+        and not supplementary_context  # no cached Tavily docs in FAISS for this topic yet
+    )
 
     # ---- Conditional Tavily Search ----
     tavily_context = ""
     if needs_search:
         try:
-            tavily = TavilySearchResults()
-            tavily_results = await tavily.ainvoke(
-                {"query": f"{difficulty} {next_topic} interview concepts"}
-            )
-            if isinstance(tavily_results, list):
-                tavily_context = "\n".join(
-                    [r.get("content", str(r)) if isinstance(r, dict) else str(r) for r in tavily_results[:2]]
+            if next_topic in _tavily_topic_cache:
+                tavily_context = _tavily_topic_cache[next_topic]
+            else:
+                tavily = TavilySearchResults()
+                tavily_results = await tavily.ainvoke(
+                    {"query": f"{difficulty} {next_topic} interview concepts"}
                 )
-                if tavily_context:
-                    tavily_docs = [
-                        Document(
-                            page_content=tavily_context[:500],
-                            metadata={"source": "tavily_question_gen", "topic": next_topic},
-                        )
-                    ]
-                    add_documents_to_index(tavily_docs, session_id)
+                if isinstance(tavily_results, list):
+                    tavily_context = "\n".join(
+                        [r.get("content", str(r)) if isinstance(r, dict) else str(r) for r in tavily_results[:2]]
+                    )
+                _tavily_topic_cache[next_topic] = tavily_context
+            if tavily_context:
+                tavily_docs = [
+                    Document(
+                        page_content=tavily_context[:500],
+                        metadata={"source": "tavily_question_gen", "topic": next_topic},
+                    )
+                ]
+                add_documents_to_index(tavily_docs, session_id)
         except Exception:
             tavily_context = ""
 
@@ -459,19 +462,26 @@ async def answer_evaluator(state: InterviewState) -> dict:
     )
     fact_context = "\n".join([d.page_content[:400] for d in fact_docs])
 
-    # Tavily fact-checking (capped at 1 result)
+    # Tavily fact-checking (Hard questions only, when no useful local context)
+    should_fact_check = difficulty == "Hard" and not fact_context.strip()
     tavily_context = ""
-    try:
-        tavily = TavilySearchResults()
-        tavily_results = await tavily.ainvoke(
-            {"query": f"Verify: {question[:80]} correct answer"}
-        )
-        if isinstance(tavily_results, list):
-            tavily_context = "\n".join(
-                [r.get("content", str(r)) if isinstance(r, dict) else str(r) for r in tavily_results[:1]]
-            )
-    except Exception:
-        tavily_context = ""
+    if should_fact_check:
+        try:
+            cache_key = question[:80]
+            if cache_key in _tavily_topic_cache:
+                tavily_context = _tavily_topic_cache[cache_key]
+            else:
+                tavily = TavilySearchResults()
+                tavily_results = await tavily.ainvoke(
+                    {"query": f"Verify: {question[:80]} correct answer"}
+                )
+                if isinstance(tavily_results, list):
+                    tavily_context = "\n".join(
+                        [r.get("content", str(r)) if isinstance(r, dict) else str(r) for r in tavily_results[:1]]
+                    )
+                _tavily_topic_cache[cache_key] = tavily_context
+        except Exception:
+            tavily_context = ""
 
     eval_prompt = f"""Evaluate this interview answer. Respond in JSON only.
 
@@ -730,9 +740,11 @@ Make the report actionable and useful for hiring managers."""
         print(f"Failed to enqueue DB write job: {e}")
 
     # The interview is over — drop this session's FAISS index so completed
-    # sessions don't leak disk. Best-effort: a stale index is harmless.
+    # sessions don't leak disk, and evict the in-process cache entry so it
+    # doesn't grow unbounded across sessions. Best-effort: stale state is harmless.
     try:
         delete_faiss_index(state["session_id"])
+        invalidate_faiss_cache(state["session_id"])
     except Exception as e:
         print(f"Failed to delete FAISS index for session {state.get('session_id')}: {e}")
 
