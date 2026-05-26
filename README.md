@@ -7,7 +7,7 @@ An advanced, real-time agentic AI system that conducts fully adaptive, context-a
 ```mermaid
 graph TD
     A["/init_interview (Resume + JD)"] --> B["ingest_documents\nChunk & embed Resume/JD → FAISS"]
-    B --> C["orchestrator_service\nExtract JD topics · Decide if search needed"]
+    B --> C["orchestrator_service\nExtract JD topics · Decide if search needed"]rrkefkljewkfjner
     C -->|needs web context| D["orchestrator_web_search\nTavily API · Embed results into FAISS"]
     D --> C
     C -->|ready| E["question_generator"]

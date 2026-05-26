@@ -1,0 +1,112 @@
+:root {
+  --color-bg-page: #000000;
+  --color-bg-app: #050505;
+  --color-bg-app-scrim: rgba(5, 5, 5, 0.8);
+  --color-bg-mesh-accent: rgba(45, 212, 191, 0.12);
+  --color-bg-mesh-alt: rgba(99, 102, 241, 0.12);
+
+  --color-panel: rgba(20, 20, 25, 0.7);
+  --color-panel-soft: rgba(255, 255, 255, 0.05);
+
+  --color-border-subtle: rgba(255, 255, 255, 0.08);
+  --color-border-subtle-weak: rgba(255, 255, 255, 0.05);
+  --color-border-subtle-strong: rgba(255, 255, 255, 0.2);
+
+  --color-text-primary: #f1f5f9;
+  --color-text-secondary: #e2e8f0;
+  --color-text-muted: #cbd5e1;
+  --color-text-subtle: #94a3b8;
+  --color-text-faint: #64748b;
+  --color-text-inverse: #000000;
+
+  --color-accent: #2dd4bf;
+  --color-accent-hover: #5eead4;
+  --color-accent-soft: rgba(45, 212, 191, 0.2);
+  --color-accent-subtle: rgba(45, 212, 191, 0.1);
+  --color-accent-border: rgba(45, 212, 191, 0.3);
+  --color-accent-glow: rgba(45, 212, 191, 0.4);
+
+  --color-accent-alt: #6366f1;
+  --color-accent-alt-hover: #818cf8;
+  --color-accent-alt-soft: rgba(99, 102, 241, 0.2);
+  --color-accent-alt-subtle: rgba(99, 102, 241, 0.06);
+  --color-accent-alt-border: rgba(99, 102, 241, 0.4);
+
+  --color-warning: #facc15;
+  --color-warning-soft: rgba(250, 204, 21, 0.15);
+  --color-warning-border: rgba(250, 204, 21, 0.3);
+
+  --color-danger: #f87171;
+  --color-danger-soft: rgba(248, 113, 113, 0.15);
+  --color-danger-border: rgba(248, 113, 113, 0.3);
+
+  --color-score-high-bg: rgba(45, 212, 191, 0.15);
+  --color-score-high-border: rgba(45, 212, 191, 0.3);
+  --color-score-mid-bg: rgba(250, 204, 21, 0.15);
+  --color-score-mid-border: rgba(250, 204, 21, 0.3);
+  --color-score-low-bg: rgba(248, 113, 113, 0.15);
+  --color-score-low-border: rgba(248, 113, 113, 0.3);
+
+  --color-scrollbar-thumb: rgba(99, 102, 241, 0.3);
+  --color-scrollbar-thumb-hover: rgba(99, 102, 241, 0.6);
+
+  --color-table-head-bg: rgba(99, 102, 241, 0.18);
+  --color-code-bg: rgba(99, 102, 241, 0.15);
+}
+
+.text-primary { color: var(--color-text-primary); }
+.text-secondary { color: var(--color-text-secondary); }
+.text-muted { color: var(--color-text-muted); }
+.text-subtle { color: var(--color-text-subtle); }
+.text-faint { color: var(--color-text-faint); }
+.text-inverse { color: var(--color-text-inverse); }
+.text-accent { color: var(--color-accent); }
+.text-accent-soft { color: var(--color-accent-hover); }
+.text-accent-alt { color: var(--color-accent-alt); }
+.text-accent-alt-soft { color: var(--color-accent-alt-hover); }
+.text-warning { color: var(--color-warning); }
+.text-danger { color: var(--color-danger); }
+
+.bg-app { background: var(--color-bg-app); }
+.bg-app-scrim { background: var(--color-bg-app-scrim); }
+.bg-panel { background: var(--color-panel); }
+.bg-panel-soft { background: var(--color-panel-soft); }
+.bg-surface-faint { background: var(--color-panel-soft); }
+.bg-surface-subtle { background: var(--color-border-subtle-strong); }
+.bg-accent { background: var(--color-accent); }
+.bg-accent-soft { background: var(--color-accent-soft); }
+.bg-accent-subtle { background: var(--color-accent-subtle); }
+.bg-accent-alt { background: var(--color-accent-alt); }
+.bg-accent-alt-soft { background: var(--color-accent-alt-soft); }
+.bg-accent-alt-subtle { background: var(--color-accent-alt-subtle); }
+
+.border-subtle { border-color: var(--color-border-subtle); }
+.border-subtle-weak { border-color: var(--color-border-subtle-weak); }
+.border-subtle-strong { border-color: var(--color-border-subtle-strong); }
+.border-accent { border-color: var(--color-accent-border); }
+.border-accent-alt { border-color: var(--color-accent-alt-border); }
+
+.mesh-accent {
+  background:
+    radial-gradient(circle 800px at 0% 0%, var(--color-bg-mesh-accent) 0%, transparent 100%),
+    radial-gradient(circle 800px at 100% 100%, var(--color-bg-mesh-alt) 0%, transparent 100%),
+    var(--color-bg-app);
+}
+
+.score-high {
+  background: var(--color-score-high-bg);
+  color: var(--color-accent);
+  border: 1px solid var(--color-score-high-border);
+}
+
+.score-mid {
+  background: var(--color-score-mid-bg);
+  color: var(--color-warning);
+  border: 1px solid var(--color-score-mid-border);
+}
+
+.score-low {
+  background: var(--color-score-low-bg);
+  color: var(--color-danger);
+  border: 1px solid var(--color-score-low-border);
+}

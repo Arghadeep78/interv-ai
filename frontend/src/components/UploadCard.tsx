@@ -8,14 +8,14 @@ export function UploadCard({
   onChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
 }) {
   return (
-    <label className="glass upload-zone rounded-2xl p-6 flex flex-col items-center gap-3 cursor-pointer border border-white/[0.07] hover:border-indigo-500/40">
+    <label className="glass upload-zone rounded-2xl p-6 flex flex-col items-center gap-3 cursor-pointer border border-subtle hover:border-accent-alt">
       <div className={`w-14 h-14 rounded-2xl flex items-center justify-center ${iconColor}`}>
         <Icon className="w-7 h-7" />
       </div>
-      <span className="font-semibold text-slate-200 text-sm">{label}</span>
+      <span className="font-semibold text-primary text-sm">{label}</span>
       {file
-        ? <span className="text-indigo-400 text-xs font-medium truncate max-w-full">{file.name}</span>
-        : <span className="text-slate-500 text-xs">PDF or TXT</span>}
+        ? <span className="text-accent-alt text-xs font-medium truncate max-w-full">{file.name}</span>
+        : <span className="text-subtle text-xs">PDF or TXT</span>}
       <input type="file" accept={accept} className="sr-only" onChange={onChange} />
     </label>
   );

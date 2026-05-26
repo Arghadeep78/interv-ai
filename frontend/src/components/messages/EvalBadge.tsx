@@ -5,11 +5,11 @@ export function EvalBadge({ score, topic, feedback }: { score: number; topic: st
   return (
     <div className="msg-ai glass rounded-xl px-4 py-3 max-w-[82%] space-y-1.5">
       <div className="flex items-center gap-2">
-        <BarChart3 className="w-4 h-4 text-slate-400" />
-        <span className="text-xs text-slate-400 uppercase tracking-wider font-medium">{topic}</span>
+        <BarChart3 className="w-4 h-4 text-subtle" />
+        <span className="text-xs text-subtle uppercase tracking-wider font-medium">{topic}</span>
         <span className={`ml-auto text-xs font-bold px-2 py-0.5 rounded-full ${cls}`}>{score}/10</span>
       </div>
-      <p className="text-slate-300 text-sm leading-relaxed">{feedback}</p>
+      <p className="text-muted text-sm leading-relaxed">{feedback}</p>
     </div>
   );
 }
