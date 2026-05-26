@@ -1,8 +1,13 @@
 # Agentic AI Interviewer
 
+<img width="1470" height="835" alt="image" src="https://github.com/user-attachments/assets/912db29c-d7cf-4c2c-a6c7-e6c6eb8744dc" />
+
+
 An advanced, real-time agentic AI system that conducts fully adaptive, context-aware technical interviews. Upload a candidate's Resume and a Job Description — the system orchestrates the entire interview autonomously: from a warm icebreaker opening, through adaptive technical questioning, to a structured final report.
 
 > **Fast start:** Thanks to in-process FAISS and embedding model caching, interviews start in **~1/5th the time (400% faster)** on warm sessions — the embedding model loads once at process startup and each session's vector store is held in memory, eliminating repeated disk I/O between questions.
+
+<img width="1464" height="826" alt="image" src="https://github.com/user-attachments/assets/343d2b5f-6808-4a83-8251-8d06d99cbc83" />
 
 ## How It Works
 
