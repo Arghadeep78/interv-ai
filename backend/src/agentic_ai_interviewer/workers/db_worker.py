@@ -26,7 +26,7 @@ async def process_db_write(ctx, state: dict):
                 "sessionId": session_id,
                 "finalReport": state.get("final_report", ""),
                 "evaluations": json.dumps(state.get("evaluations", [])),
-                "extractedSkills": json.dumps(state.get("jd_skills", []))
+                "extractedSkills": json.dumps(state.get("jd_topics", []))
             }
         })
         print(f"Successfully saved session {session_id} to NeonDB!")

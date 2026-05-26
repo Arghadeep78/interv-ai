@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { API_URL, WS_URL } from './config';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -138,6 +139,7 @@ export default function App() {
   const [currentInput, setCurrentInput] = useState('');
   const [isWaiting, setIsWaiting]     = useState(false);
   const [elapsedSecs, setElapsedSecs] = useState(0);
+  const [initError, setInitError]     = useState<string | null>(null);
   const wsRef              = useRef<WebSocket | null>(null);
   const messagesEndRef     = useRef<HTMLDivElement | null>(null);
   const timerRef           = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -166,24 +168,33 @@ export default function App() {
   const handleStart = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!resume || !jd) return;
+    setInitError(null);
     setStatus('uploading');
     const formData = new FormData();
     formData.append('resume', resume);
     formData.append('jd', jd);
     try {
-      const res = await axios.post<{ session_id: string }>('http://localhost:8000/init_interview', formData);
+      const res = await axios.post<{ session_id: string; status: string }>(
+        `${API_URL}/init_interview`,
+        formData,
+        { timeout: 90_000 },
+      );
       setSessionId(res.data.session_id);
-      setStatus('processing');
-      pollStatus(res.data.session_id);
-    } catch {
+      setStatus(res.data.status === 'ready' ? 'ready' : 'processing');
+      if (res.data.status !== 'ready') pollStatus(res.data.session_id);
+    } catch (err) {
       setStatus('idle');
+      const msg = axios.isAxiosError(err) && err.code === 'ECONNABORTED'
+        ? 'Initialization timed out. Is the backend running on :8000?'
+        : 'Could not reach the interview server. Check that the backend is running.';
+      setInitError(msg);
     }
   };
 
   const pollStatus = (sid: string) => {
     const interval = setInterval(async () => {
       try {
-        const res = await axios.get<{ status: string }>(`http://localhost:8000/status/${sid}`);
+        const res = await axios.get<{ status: string }>(`${API_URL}/status/${sid}`);
         if (res.data.status === 'ready') { clearInterval(interval); setStatus('ready'); }
       } catch { /* retry */ }
     }, 2000);
@@ -194,7 +205,7 @@ export default function App() {
     if (!sessionId) return;
     setStatus('interviewing');
     setElapsedSecs(0);
-    const ws = new WebSocket(`ws://localhost:8000/ws/interview/${sessionId}`);
+    const ws = new WebSocket(`${WS_URL}/ws/interview/${sessionId}`);
 
     ws.onmessage = (event: MessageEvent) => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -312,6 +323,17 @@ export default function App() {
                   <span className="flex items-center gap-3"><Loader2 className="w-6 h-6 animate-spin" /> INITIALIZING</span>
                 ) : 'Launch Interview'}
               </button>
+
+              {status === 'uploading' && (
+                <p className="text-muted text-sm font-medium tracking-wide -mt-2">
+                  Parsing documents and generating your first question. This can take 20–30 seconds…
+                </p>
+              )}
+              {initError && (
+                <p className="score-low px-4 py-3 text-sm font-bold tracking-wide -mt-2 max-w-lg text-center">
+                  {initError}
+                </p>
+              )}
             </form>
           )}
 
@@ -394,8 +416,9 @@ export default function App() {
                           </div>
                           <div>
                             <p className={`text-3xl font-display ${
-                              m.summary.average_score >= 7 ? 'text-accent' :
-                              m.summary.average_score >= 5 ? 'text-warning' : 'text-danger'}>`
+                              m.summary.average_score >= 7 ? 'text-accent'
+                              : m.summary.average_score >= 5 ? 'text-warning'
+                              : 'text-danger'}`}>
                               {m.summary.average_score}/10
                             </p>
                             <p className="text-xs font-bold text-accent-soft mt-1 uppercase tracking-widest">Avg Score</p>

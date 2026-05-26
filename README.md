@@ -63,6 +63,17 @@ graph TD
 - **Real-time:** Native WebSockets
 - **HTTP Client:** Axios
 
+## Security posture
+
+This is a **portfolio / demo project** — no authentication or authorisation is implemented by design.
+
+| Assumption | Implication |
+|---|---|
+| No auth on any endpoint | Anyone with network access to the backend can open a session or connect to any `session_id`'s WebSocket. In a production deployment, add an auth layer (API key, JWT, OAuth) in front of `/init_interview` and `/ws/interview/*`. |
+| No rate limiting per user | A single client can open unlimited sessions. Add per-IP or per-token rate limiting for public deployments. |
+| FAISS indexes written to disk | Indexes are deleted when a session's report is generated. Long-running or abandoned sessions leave a directory on disk until the process restarts; ensure the host has adequate disk headroom. |
+| `allow_dangerous_deserialization` on FAISS load | FAISS uses pickle internally. The flag is safe here because only the server writes the indexes, and paths are server-generated UUIDs — never user-supplied. |
+
 ## Getting Started
 
 1. **Clone** the repository.

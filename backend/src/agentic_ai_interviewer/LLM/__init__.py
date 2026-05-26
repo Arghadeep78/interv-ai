@@ -30,7 +30,7 @@ class RateLimitExhaustedError(Exception):
 # ---------------------------------------------------------------------------
 MODELS = {
     "heavy": "llama-3.3-70b-versatile",
-    "medium": "mixtral-8x7b-32768",
+    "medium": "gemma2-9b-it",
     "light": "llama-3.1-8b-instant",
 }
 
@@ -39,6 +39,7 @@ LIGHT_FALLBACK_CHAIN = [MODELS["light"], MODELS["medium"]]
 
 DEFAULT_MAX_TOKENS = {
     "heavy": 1024,
+    "medium": 512,
     "light": 256,
 }
 

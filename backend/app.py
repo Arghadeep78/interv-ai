@@ -9,33 +9,20 @@ import asyncio
 # Add src to the Python path so we can import our modules smoothly
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "src")))
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 import redis.asyncio as redis
 from dotenv import load_dotenv
 
-from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.redis import AsyncRedisSaver
 from agentic_ai_interviewer.graph import build_graph
 from agentic_ai_interviewer.LLM import RateLimitExhaustedError
 from agentic_ai_interviewer.nodes import generate_report
 import pypdf
 
 load_dotenv()
-
-app = FastAPI(
-    title="Agentic AI Interviewer",
-    description="Real-time AI-powered technical interview system",
-    version="2.0.0",
-)
-
-# CORS Middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # For production, restrict to actual frontend domain
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
 
@@ -46,34 +33,78 @@ graph_app = None
 redis_client = None
 
 
-@app.on_event("startup")
-async def startup():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     global graph_app, redis_client
 
-    # Redis client for session status tracking
     redis_client = redis.from_url(redis_url, decode_responses=True)
 
-    # Build and compile the graph with Memory checkpointer
-    checkpointer = MemorySaver()
-    workflow = build_graph()
-    graph_app = workflow.compile(
-        checkpointer=checkpointer,
-        interrupt_before=["answer_evaluator"],
-    )
+    # AsyncRedisSaver is used as a context manager so the connection is cleanly
+    # released on shutdown. The checkpointer must stay alive for the app's entire
+    # lifetime because graph_app holds a reference to it.
+    async with AsyncRedisSaver.from_conn_string(redis_url) as checkpointer:
+        await checkpointer.asetup()
+        workflow = build_graph()
+        graph_app = workflow.compile(
+            checkpointer=checkpointer,
+            interrupt_before=["answer_evaluator"],
+        )
+        yield
+
+    await redis_client.aclose()
 
 
-@app.on_event("shutdown")
-async def shutdown():
-    if redis_client:
-        await redis_client.close()
+app = FastAPI(
+    title="Agentic AI Interviewer",
+    description="Real-time AI-powered technical interview system",
+    version="2.0.0",
+    lifespan=lifespan,
+)
+
+# CORS Middleware
+# Explicit origins only — a wildcard "*" is invalid alongside allow_credentials
+# and unsafe. Set CORS_ORIGINS to a comma-separated list of frontend origins in
+# production (e.g. "https://interv.example.com"); defaults to the Vite dev server.
+cors_origins = [
+    origin.strip()
+    for origin in os.environ.get("CORS_ORIGINS", "http://localhost:5173").split(",")
+    if origin.strip()
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ---------------------------------------------------------------------------
+# Input guards — cap upload size and WS message length to avoid trivial OOM.
+# ---------------------------------------------------------------------------
+MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", 5 * 1024 * 1024))  # 5 MB
+MAX_WS_MESSAGE_CHARS = int(os.environ.get("MAX_WS_MESSAGE_CHARS", 10_000))
+ALLOWED_UPLOAD_EXTENSIONS = (".pdf", ".txt")
 
 
 # ---------------------------------------------------------------------------
 # Helper: Extract text from uploaded files (PDF or plain text)
 # ---------------------------------------------------------------------------
 async def extract_text_from_upload(file_upload: UploadFile) -> str:
+    filename = (file_upload.filename or "").lower()
+    if not filename.endswith(ALLOWED_UPLOAD_EXTENSIONS):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type. Allowed: {', '.join(ALLOWED_UPLOAD_EXTENSIONS)}.",
+        )
+
     content = await file_upload.read()
-    if file_upload.filename and file_upload.filename.lower().endswith(".pdf"):
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large. Maximum allowed size is {MAX_UPLOAD_BYTES // (1024 * 1024)} MB.",
+        )
+
+    if filename.endswith(".pdf"):
         try:
             pdf_reader = pypdf.PdfReader(io.BytesIO(content))
             text = ""
@@ -220,6 +251,17 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         while True:
             # Wait for the candidate's answer
             data = await websocket.receive_text()
+
+            # Guard against oversized messages (trivial OOM / abuse). Reject and
+            # keep the socket open so the candidate can resend a shorter answer.
+            if len(data) > MAX_WS_MESSAGE_CHARS:
+                await websocket.send_text(
+                    json.dumps({
+                        "type": "error",
+                        "content": f"Answer too long (max {MAX_WS_MESSAGE_CHARS} characters). Please shorten it.",
+                    })
+                )
+                continue
 
             # Notify client that we're processing
             await websocket.send_text(

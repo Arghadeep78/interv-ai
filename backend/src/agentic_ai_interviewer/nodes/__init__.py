@@ -15,6 +15,7 @@ from agentic_ai_interviewer.tools.vectorstore import (
     save_faiss_index,
     load_faiss_index,
     add_documents_to_index,
+    delete_faiss_index,
 )
 
 redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
@@ -727,5 +728,12 @@ Make the report actionable and useful for hiring managers."""
         await pool.close()
     except Exception as e:
         print(f"Failed to enqueue DB write job: {e}")
+
+    # The interview is over — drop this session's FAISS index so completed
+    # sessions don't leak disk. Best-effort: a stale index is harmless.
+    try:
+        delete_faiss_index(state["session_id"])
+    except Exception as e:
+        print(f"Failed to delete FAISS index for session {state.get('session_id')}: {e}")
 
     return {"final_report": final_report}

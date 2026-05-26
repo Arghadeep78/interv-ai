@@ -1,4 +1,5 @@
 import os
+import shutil
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_core.documents import Document
@@ -17,6 +18,16 @@ def get_faiss_path(session_id: str) -> str:
     return path
 
 
+def delete_faiss_index(session_id: str) -> None:
+    """
+    Removes a session's on-disk FAISS index. Called once the interview report
+    is generated so completed sessions don't accumulate on disk forever.
+    """
+    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../"))
+    path = os.path.join(base_dir, "faiss_store", session_id)
+    shutil.rmtree(path, ignore_errors=True)
+
+
 def save_faiss_index(docs: list[Document], session_id: str) -> FAISS:
     """Creates a new FAISS index from documents and saves it to disk."""
     embeddings = get_embeddings()
@@ -28,6 +39,9 @@ def save_faiss_index(docs: list[Document], session_id: str) -> FAISS:
 def load_faiss_index(session_id: str) -> FAISS:
     """Loads a FAISS index from disk for a given session."""
     embeddings = get_embeddings()
+    # allow_dangerous_deserialization unpickles the stored index. This is safe
+    # here because the only writer is our own save_faiss_index / add_documents_to_index,
+    # and the path is a UUID controlled entirely by the server — never user-supplied.
     return FAISS.load_local(
         get_faiss_path(session_id),
         embeddings,
@@ -45,7 +59,7 @@ def add_documents_to_index(docs: list[Document], session_id: str) -> FAISS:
 
     try:
         existing = FAISS.load_local(
-            path, embeddings, allow_dangerous_deserialization=True
+            path, embeddings, allow_dangerous_deserialization=True  # safe — server-written UUID path
         )
         new_store = FAISS.from_documents(docs, embeddings)
         existing.merge_from(new_store)
