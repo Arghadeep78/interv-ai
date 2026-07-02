@@ -42,5 +42,8 @@ class InterviewState(TypedDict):
     requires_hint: bool  # default False — set True when answer score <= 5
     failed_condition_context: str  # describes the specific conceptual gap for follow-up
 
+    # Confidence Router
+    router_decision: str  # "default" | "augmented" | "reranked" — set by confidence_router each turn
+
     # Final Output
     final_report: str

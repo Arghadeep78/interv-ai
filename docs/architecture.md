@@ -25,7 +25,13 @@ graph TD
     E4 --> F
 
     F["answer_evaluator ⏸️ INTERRUPT\nScore · Skip detection · Difficulty adjustment"]
-    F -->|time < 40 min AND topics remain| F1["generate_appreciation\nLight LLM 8B · Warm transition"]
+    F -->|time < 40 min AND topics remain| CR["confidence_router\nSignal-driven routing · Augment or Rerank"]
+    CR -->|score < 6 + Hard| CR1["Fetch targeted Tavily context\nEmbed into FAISS for Socratic follow-up"]
+    CR -->|score ≥ 8| CR2["Rerank jd_topics\nby JD embedding similarity"]
+    CR -->|default| F1
+    CR1 --> F1
+    CR2 --> F1
+    F1["generate_appreciation\nLight LLM 8B · Warm transition"]
     F1 --> E
     F -->|time >= 40 min OR all topics covered| G
     F -->|user_requested_stop| G
@@ -62,6 +68,8 @@ graph TD
 | `orchestrator_web_search` | — | Runs Tavily query; embeds results back into FAISS for use by later nodes |
 | `question_generator` | Light/Heavy | **Four operational modes** (see below) |
 | `answer_evaluator` | Heavy (70B) | Scores answer 1–10, detects skip intent, adjusts difficulty, triggers hint or burns topic |
+| `confidence_router` | — | **Signal-driven routing**: on score < 6 (Hard) fetches targeted Tavily augmentation and caches it into FAISS; on score ≥ 8 reranks remaining `jd_topics` by JD embedding similarity; otherwise no-op passthrough. Closes the agentic feedback loop between evaluation and next question. |
+| `generate_appreciation` | Light (8B) | Generates warm transition text before the next question |
 | `generate_report` | Heavy (70B) | Produces a structured Markdown report; enqueues async DB write via ARQ |
 
 #### Question Generator — Four Modes
@@ -74,11 +82,12 @@ Mode D  Normal Question  [Heavy 70B] Topic-targeted technical question at the cu
 ```
 
 #### Graph Routing Flow
-The state machine implements a dual-termination strategy bounded by a 40-minute duration limit or complete topic coverage, paired with dynamic capability routing.
+The state machine implements a dual-termination strategy bounded by a 40-minute duration limit or complete topic coverage, with a closed-loop adaptive control layer between evaluation and question generation.
 1. Document ingestion and topic evaluation loops with web searches until sufficient topic mastery is gained.
 2. The `answer_evaluator` leverages the Human-in-the-loop interruption pause.
-3. Depending on evaluation: candidate performance dynamically alters difficulty (Easy, Medium, Hard). Socratic hint nodes loop backwards without topic burn until answered correctly or skipped. 
-4. Stop sequences instantly pivot the routing straight into reporting.
+3. Depending on evaluation: candidate performance dynamically alters difficulty (Easy, Medium, Hard). Socratic hint nodes loop backwards without topic burn until answered correctly or skipped.
+4. **`confidence_router`** runs on every CONTINUE branch: it reads the last score and either enriches FAISS with targeted web context (low score + Hard) or reorders the topic queue by JD relevance (high score) before handing off to appreciation and the next question.
+5. Stop sequences instantly pivot the routing straight into reporting.
 
 ### 4. LLM Engine — Groq + Tenacity
 
@@ -133,7 +142,7 @@ In a typical 6-question interview (4 Easy/Medium, 2 Hard with 1 new topic each):
 - **~83% reduction in external search calls**, cutting ~2–5 s of accumulated network latency per interview and eliminating the majority of per-turn Tavily API cost
 
 ### 6. State Machine Schema (`InterviewState`)
-21 state fields maintain the progression context, including new behavioral modifiers:
+22 state fields maintain the progression context, including new behavioral modifiers:
 ```python
 start_time                 # Evaluates 40-minute limits
 current_difficulty         # Tracks and shifts scaling difficulty (Easy, Medium, Hard)
@@ -141,6 +150,7 @@ user_requested_stop        # Hard stop flag — bypasses all routing checks
 requires_hint              # Socratic failure trigger
 failed_condition_context   # Employs previous answer to format failure-scenario based targeted Socratic hints
 covered_topics             # Records tested nodes ensuring no re-testing of the same metric across interview lifespan
+router_decision            # Set by confidence_router each turn: "default" | "augmented" | "reranked"
 ```
 *Facilitated natively using `AsyncRedisSaver` for efficient scaling across worker tasks and thread retention during potential timeouts.*
 

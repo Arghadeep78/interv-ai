@@ -34,6 +34,10 @@ This document outlines the end-to-end flow of the Agentic AI Interviewer, visual
     * **Difficulty Adjustment:** Dynamically scales the difficulty of upcoming questions (Easy, Medium, Hard) depending on the candidate's performance.
     * **Gated Fact-Checking:** A Tavily verification search runs only when the question is **Hard** *and* the session's FAISS store holds no useful local context — Easy/Medium answers and Hard answers with sufficient local context skip the network call entirely. Results are cached so a retried evaluation never re-searches the same question.
     * **Hints:** If the answer is on the wrong track, it sets up a Socratic hint rather than revealing the answer straight away.
+* **Confidence Routing (`confidence_router`):** Before the appreciation text is generated, a signal-driven router inspects the last score and fires one of three paths:
+    * **Augment (score < 6, Hard difficulty):** Fetches a targeted Tavily web search on the failing topic and embeds the result into FAISS — so the Socratic follow-up question is grounded in fresh, specific context the candidate is missing.
+    * **Rerank (score ≥ 8):** Re-orders the remaining `jd_topics` list by cosine similarity to the JD embedding, ensuring the next question covers the most relevant uncovered gap rather than following arbitrary list order.
+    * **Default:** No-op passthrough for mid-range scores.
 * **Appreciation & Transition (`generate_appreciation`):** The system generates a brief acknowledgment or warm transition based on the evaluation before proceeding.
 * **Next Question Generation (`question_generator`):** 
     * If a hint is needed, **Mode B (Socratic Hint)** activates to present a concrete failing scenario based closely on the candidate's answer.

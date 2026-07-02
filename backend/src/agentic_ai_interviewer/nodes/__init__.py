@@ -64,6 +64,7 @@ async def ingest_documents(state: InterviewState) -> dict:
         "current_difficulty": "Easy",
         "evaluator_feedback": "",
         "question_ready": False,
+        "router_decision": "default",
     }
 
 
@@ -630,6 +631,113 @@ Output ONLY the JSON."""
         "requires_hint": hint_needed,
         "failed_condition_context": failed_ctx,
     }
+
+
+# ---------------------------------------------------------------------------
+# 6. CONFIDENCE ROUTER
+# ---------------------------------------------------------------------------
+async def confidence_router(state: InterviewState) -> dict:
+    """
+    Signal-driven routing node that sits between answer_evaluator and
+    generate_appreciation. Reads the last evaluation score and makes three
+    decisions:
+
+    1. NEEDS_AUGMENTATION — Hard question, score < 6, no cached Tavily content
+       for the topic in FAISS yet → fetch and cache web context NOW so the next
+       question on this topic is grounded. Sets router_decision="augmented".
+
+    2. TOPIC_MASTERED — score >= 8 → re-rank available_topics by JD embedding
+       similarity so the most relevant uncovered topic is asked next.
+       Sets router_decision="reranked".
+
+    3. DEFAULT — anything else → no-op, lets normal flow continue.
+       Sets router_decision="default".
+
+    The node never changes covered_topics or difficulty — that is the
+    evaluator's job. It only enriches context or reorders the topic queue
+    so question_generator gets better inputs.
+    """
+    session_id = state["session_id"]
+    evals = state.get("evaluations", [])
+    jd_topics = state.get("jd_topics", [])
+    covered = state.get("covered_topics", [])
+
+    if not evals:
+        return {"router_decision": "default"}
+
+    last_eval = evals[-1]
+    score = int(last_eval.get("score", 5))
+    topic_tested = last_eval.get("topic_tested", "")
+    difficulty = state.get("current_difficulty", "Medium")
+
+    # ------------------------------------------------------------------ #
+    # PATH 1 — LOW-SCORE AUGMENTATION                                     #
+    # Fetch targeted Tavily context for the failing topic so the next     #
+    # question (Socratic or otherwise) has fresh grounding.               #
+    # ------------------------------------------------------------------ #
+    if score < 6 and difficulty == "Hard" and topic_tested:
+        cache_key = f"router_{topic_tested}"
+        if cache_key not in _tavily_topic_cache:
+            try:
+                tavily = TavilySearchResults()
+                results = await tavily.ainvoke(
+                    {"query": f"{topic_tested} common misconceptions correct explanation"}
+                )
+                if isinstance(results, list):
+                    augment_text = "\n".join(
+                        [r.get("content", str(r)) if isinstance(r, dict) else str(r)
+                         for r in results[:2]]
+                    )
+                else:
+                    augment_text = str(results)
+
+                _tavily_topic_cache[cache_key] = augment_text
+
+                if augment_text:
+                    add_documents_to_index(
+                        [Document(
+                            page_content=augment_text[:600],
+                            metadata={"source": "tavily_router", "topic": topic_tested},
+                        )],
+                        session_id,
+                    )
+            except Exception:
+                pass
+
+        return {"router_decision": "augmented"}
+
+    # ------------------------------------------------------------------ #
+    # PATH 2 — TOPIC MASTERY RERANK                                       #
+    # Candidate aced the last question. Re-rank remaining topics by       #
+    # cosine similarity to the JD embedding so the most relevant gap      #
+    # is addressed next rather than blindly following list order.         #
+    # ------------------------------------------------------------------ #
+    if score >= 8:
+        available = [t for t in jd_topics if t not in covered]
+        if len(available) > 1:
+            try:
+                vectorstore = load_faiss_index(session_id)
+                scored_topics: list[tuple[float, str]] = []
+                for topic in available:
+                    docs = vectorstore.similarity_search_with_score(
+                        f"{topic} job requirements skills", k=1
+                    )
+                    # FAISS returns L2 distance — lower is more similar.
+                    # Convert to a similarity rank by negating.
+                    sim = -docs[0][1] if docs else -999.0
+                    scored_topics.append((sim, topic))
+
+                scored_topics.sort(reverse=True)
+                reranked = [t for _, t in scored_topics]
+
+                # Rebuild jd_topics with covered topics preserved at front,
+                # reranked available topics appended after.
+                new_order = [t for t in jd_topics if t in covered] + reranked
+                return {"jd_topics": new_order, "router_decision": "reranked"}
+            except Exception:
+                pass
+
+    return {"router_decision": "default"}
 
 
 # ---------------------------------------------------------------------------

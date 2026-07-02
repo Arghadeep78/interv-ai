@@ -7,6 +7,7 @@ from agentic_ai_interviewer.nodes import (
     orchestrator_web_search,
     question_generator,
     answer_evaluator,
+    confidence_router,
     generate_appreciation,
     generate_report,
 )
@@ -21,8 +22,13 @@ def build_graph() -> StateGraph:
             YES → orchestrator_web_search → orchestrator_service
             NO  → question_generator → answer_evaluator (INTERRUPT)
                     → [check_interview_status]
-                        CONTINUE → question_generator
+                        CONTINUE → confidence_router → generate_appreciation → question_generator
                         END      → generate_report → END
+
+    confidence_router decisions (signal-driven, between evaluator and appreciation):
+        score < 6 AND Hard → fetch+cache targeted Tavily context for the failing topic
+        score >= 8          → rerank remaining jd_topics by JD embedding similarity
+        otherwise           → no-op passthrough
     """
     workflow = StateGraph(InterviewState)
 
@@ -32,6 +38,7 @@ def build_graph() -> StateGraph:
     workflow.add_node("orchestrator_web_search", orchestrator_web_search)
     workflow.add_node("question_generator", question_generator)
     workflow.add_node("answer_evaluator", answer_evaluator)
+    workflow.add_node("confidence_router", confidence_router)
     workflow.add_node("generate_appreciation", generate_appreciation)
     workflow.add_node("generate_report", generate_report)
 
@@ -91,9 +98,12 @@ def build_graph() -> StateGraph:
         check_interview_status,
         {
             "end": "generate_report",
-            "continue": "generate_appreciation",
+            "continue": "confidence_router",
         },
     )
+
+    # confidence_router always feeds into appreciation then question generator
+    workflow.add_edge("confidence_router", "generate_appreciation")
 
     # Appreciation always goes to question generator
     workflow.add_edge("generate_appreciation", "question_generator")
